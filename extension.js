@@ -3,7 +3,7 @@
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Shell from 'gi://Shell';
-import St from 'gi://St';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const BLUR_RADIUS = 40;       // maximum blur radius
@@ -79,68 +79,77 @@ export default class TelegramFocusBlur extends Extension {
         }
         for (const [actor, state] of this._states) {
             actor.disconnect(state.destroyId);
-            this._destroyState(state);
+            this._stopTimers(state);
+            state.box.destroy();
         }
         this._states = null;
     }
 
     _update() {
-        const target = isTelegram(windowUnderPointer()) ? 0 : 1;
+        // Always blurred in the overview; otherwise clear while hovered
+        const hovered = !Main.overview.visible && isTelegram(windowUnderPointer());
+        const target = hovered ? 0 : 1;
         for (const actor of global.get_window_actors()) {
             if (!isTelegram(actor.get_meta_window()))
                 continue;
-            let state = this._states.get(actor);
+            const state = this._states.get(actor);
             if (!state) {
-                state = this._createState(actor, target);
+                this._createState(actor, target);
                 continue;
             }
-            this._syncOverlay(actor, state);
+            this._syncGeometry(actor, state);
             this._setTarget(actor, state, target);
         }
     }
 
-    // Frosted overlay stacked right above the Telegram window, clipped to its frame (no shadow)
+    // The blur layer lives *inside* the window actor, so every Clutter.Clone of the
+    // window (workspace switch animation, overview, window previews) carries it too.
+    // It holds a clone of the window's own surface, clipped to the visible frame
+    // (shadows excluded), and blurs that copy on top of the real content.
     _createState(actor, target) {
-        const effect = new Shell.BlurEffect({mode: Shell.BlurMode.BACKGROUND});
-        const overlay = new St.Widget({reactive: false});
-        overlay.add_effect(effect);
-        global.window_group.add_child(overlay);
+        const surface = actor.get_first_child();
+        if (!surface)
+            return;
+        const box = new Clutter.Actor({reactive: false, clip_to_allocation: true});
+        const clone = new Clutter.Clone({source: surface, reactive: false});
+        const effect = new Shell.BlurEffect({mode: Shell.BlurMode.ACTOR});
+        box.add_child(clone);
+        box.add_effect(effect);
+        actor.add_child(box);
 
-        const state = {overlay, effect, level: target, target, timeline: null, delayId: 0};
+        const state = {box, clone, effect, level: target, target, timeline: null, delayId: 0};
         state.destroyId = actor.connect('destroy', () => {
-            this._destroyState(state);
+            this._stopTimers(state);
             this._states?.delete(actor);
         });
         this._states.set(actor, state);
         this._apply(state, target);
-        this._syncOverlay(actor, state);
-        return state;
+        this._syncGeometry(actor, state);
     }
 
-    _destroyState(state) {
+    _stopTimers(state) {
         state.timeline?.stop();
-        if (state.delayId)
+        state.timeline = null;
+        if (state.delayId) {
             GLib.source_remove(state.delayId);
-        state.overlay.destroy();
+            state.delayId = 0;
+        }
     }
 
-    _syncOverlay(actor, state) {
-        const {overlay} = state;
-        const visible = actor.visible && state.level > 0.001;
-        if (overlay.visible !== visible)
-            overlay.visible = visible;
-        if (!visible)
-            return;
-
+    _syncGeometry(actor, state) {
+        const {box, clone} = state;
         const r = actor.get_meta_window().get_frame_rect();
-        if (overlay.x !== r.x || overlay.y !== r.y)
-            overlay.set_position(r.x, r.y);
-        if (overlay.width !== r.width || overlay.height !== r.height)
-            overlay.set_size(r.width, r.height);
-        // Keep it directly above Telegram, below any windows covering it
-        if (overlay.get_parent() === actor.get_parent() && overlay.get_previous_sibling() !== actor)
-            global.window_group.set_child_above_sibling(overlay, actor);
-        overlay.opacity = actor.opacity;
+        const ox = r.x - actor.x;
+        const oy = r.y - actor.y;
+        if (box.x !== ox || box.y !== oy) {
+            box.set_position(ox, oy);
+            clone.set_position(-ox, -oy);
+        }
+        if (box.width !== r.width || box.height !== r.height)
+            box.set_size(r.width, r.height);
+        // Stay above the window's own surface
+        if (actor.get_last_child() !== box)
+            actor.set_child_above_sibling(box, null);
     }
 
     _setTarget(actor, state, target) {
@@ -154,9 +163,14 @@ export default class TelegramFocusBlur extends Extension {
                 this._animate(actor, state, 0);
             return;
         }
-        // Pointer left: wait a bit, then blur gradually
         if (state.target === 1 || state.delayId)
             return;
+        // Entering the overview: blur immediately, no delay
+        if (Main.overview.visible) {
+            this._animate(actor, state, 1);
+            return;
+        }
+        // Pointer left: wait a bit, then blur gradually
         state.delayId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, HIDE_DELAY_MS, () => {
             state.delayId = 0;
             this._animate(actor, state, 1);
@@ -176,12 +190,10 @@ export default class TelegramFocusBlur extends Extension {
         timeline.connect('new-frame', () => {
             state.level = from + (target - from) * ease(timeline.get_progress());
             this._apply(state, state.level);
-            this._syncOverlay(actor, state);
         });
         timeline.connect('completed', () => {
             state.level = target;
             this._apply(state, target);
-            this._syncOverlay(actor, state);
             if (state.timeline === timeline)
                 state.timeline = null;
         });
@@ -189,8 +201,11 @@ export default class TelegramFocusBlur extends Extension {
         timeline.start();
     }
 
-    // level 0..1 -> blur radius and brightness
+    // level 0..1 -> blur radius and brightness; hidden entirely when clear
     _apply(state, level) {
+        const visible = level > 0.001;
+        if (state.box.visible !== visible)
+            state.box.visible = visible;
         state.effect.radius = Math.round(BLUR_RADIUS * level);
         state.effect.brightness = 1 - (1 - BRIGHTNESS) * level;
     }

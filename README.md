@@ -36,8 +36,8 @@ gnome-extensions uninstall telegram-focus-blur@lan2k3.github.io
 ## How it works
 
 1. Telegram windows are detected by their WM class or app id, matching anything that contains `telegram`.
-2. Every 40 ms the extension reads the pointer position and finds the topmost window under it.
-3. Each Telegram window gets its own overlay, sized to the window frame (shadows excluded). The overlay blurs what is behind it with `Shell.BlurEffect` in background mode. It sits directly above Telegram, below any window covering it, and lets clicks pass through.
+2. Every 40 ms the extension reads the pointer position and finds the topmost window under it. In the Activities overview, Telegram always stays blurred.
+3. A blur layer is added *inside* each Telegram window actor. It holds a clone of the window's own content, clipped to the visible frame (shadows excluded), and blurs it with `Shell.BlurEffect`. Because the layer belongs to the window, GNOME's window clones also show it: the workspace switch animation, the Activities overview and the Alt+Tab previews. Clicks pass straight through.
 4. Blur radius and brightness are animated per frame with a `Clutter.Timeline`. If you move the pointer back mid-animation, the animation reverses from where it is, without jumping.
 
 ## Configuration
@@ -55,7 +55,6 @@ Edit the constants at the top of `extension.js`, then log out and back in:
 
 ## Known limitations
 
-- Window thumbnails in the Activities overview and the Alt+Tab switcher are not blurred.
 - Desktop notifications still show message previews. To hide them, open Telegram → Settings → Notifications and turn off sender name and message preview.
 - Telegram stays blurred while you type if the pointer is outside its window.
 
