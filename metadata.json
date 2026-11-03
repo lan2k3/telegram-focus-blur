@@ -1,0 +1,8 @@
+{
+  "uuid": "telegram-focus-blur@lan2k3.github.io",
+  "name": "Telegram Focus Blur",
+  "description": "Blurs Telegram windows unless the pointer is hovering over them, with smooth Apple-style animations. Keeps your chats private from onlookers.",
+  "url": "https://github.com/lan2k3/telegram-focus-blur",
+  "version": 1,
+  "shell-version": ["48"]
+}
